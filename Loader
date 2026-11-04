@@ -1,4 +1,4 @@
-local NAME, VERSION, TAB = "MM2", "2.24.20", "MM2 Hub"
+local NAME, VERSION, TAB = "MM2", "V2.24.20 Owner Edition", "MM2 Hub"
 local GAME_IDS, PLACE_IDS = {"66654135"}, {"142823291"}
 local function inGame()
   for _, id in ipairs(GAME_IDS) do if tonumber(id) == game.GameId then return true end end
@@ -6,64 +6,6 @@ local function inGame()
   return false
 end
 if game.PlaceId ~= 0 and not inGame() then return end
-local BLACKLIST_URL = "https://raw.githubusercontent.com/kerog138/Mm2-Hub-Blacklists/main/Loader"
-local function fetchBlacklist()
-  local url = BLACKLIST_URL .. "?t=" .. tostring(math.floor(os.time()))
-  local ok, body = pcall(function() return httpget(url) end)
-  if not ok or type(body) ~= "string" then ok, body = pcall(function() return game:HttpGet(url) end) end
-  local list = {}
-  if ok and type(body) == "string" then
-    for id, flag in body:gmatch("(%d+)%s*,%s*(%a+)") do
-      local n = tonumber(id)
-      if n and n > 0 then list[n] = flag:lower() == "true" end
-    end
-  end
-  return list
-end
-local function blockIfBlacklisted()
-  local okId, id = pcall(function() return game:GetService("Players").LocalPlayer.UserId end)
-  if not (okId and id) then return nil end
-  local say = fetchBlacklist()[id]
-  if say == nil then return false end
-  if say then print("blacklisted") end
-  return true
-end
-local TOGGLE_API = "https://api.github.com/repos/kerog138/Forsaken-Script-Hub/contents/Loader?ref=main"
-local TOGGLE_URL = "https://raw.githubusercontent.com/kerog138/Forsaken-Script-Hub/refs/heads/main/Loader"
-local TOGGLE_EVERY = 75
-local TOGGLE_OWNER = 2852825249
-local function httpGet(url)
-  local ok, body = pcall(function() return httpget(url) end)
-  if not ok or type(body) ~= "string" then ok, body = pcall(function() return game:HttpGet(url) end) end
-  return ok and type(body) == "string" and body or nil
-end
-local function toggleWord(text)
-  if type(text) ~= "string" then return nil end
-  for line in text:gmatch("[^\r\n]+") do
-    local s = line:match("^%s*(.-)%s*$")
-    if s ~= "" and s:sub(1, 2) ~= "--" then
-      local word = s:match("^(%a+)")
-      word = word and word:lower()
-      if word == "true" then return true elseif word == "false" then return false end
-      return nil
-    end
-  end
-  return nil
-end
-local function fetchToggle()
-  local body = httpGet(TOGGLE_API)
-  local data = body and select(2, pcall(function() return game:GetService("HttpService"):JSONDecode(body) end))
-  local content = type(data) == "table" and type(data.content) == "string" and data.content
-  local text = content and select(2, pcall(function() return base64decode((content:gsub("%s", ""))) end))
-  local on = toggleWord(text)
-  if on ~= nil then return on end
-  return toggleWord(httpGet(TOGGLE_URL))
-end
-local function switchedOff()
-  local okId, id = pcall(function() return game:GetService("Players").LocalPlayer.UserId end)
-  if okId and tonumber(id) == TOGGLE_OWNER then return false end
-  return fetchToggle() == false
-end
 if type(_G[NAME]) == "table" and type(_G[NAME].Unload) == "function" then pcall(_G[NAME].Unload) end
 local Players, HttpService = game:GetService("Players"), game:GetService("HttpService")
 local function wallTime() local ok, t = pcall(os.time) return ok and type(t) == "number" and t or os.clock() end
@@ -1608,7 +1550,6 @@ local function buildTab(tab)
   local cr = tab:Section("Credits", "Right")
   cr:Text("Creator: kerog138")
   cr:Text("Version: " .. VERSION)
-  cr:Text("Join our Discord! The invite is in the Matcha post.")
 
   local rm = tab:Section("Reset Method", "Right")
   rm:Combo("mm2_reset_method", "Reset method", RESET_MODES, Settings.resetOffsets and 1 or 0)
@@ -1681,16 +1622,14 @@ task.spawn(function()
   if not waitUntil(function() return game.PlaceId ~= 0 end, 120) then if Session.alive then API.Unload() end return end
   if not inGame() then API.Unload() return end
   if not waitUntil(function() local p = Players.LocalPlayer return game:IsLoaded() and p and p:FindFirstChild("PlayerGui") end, 120) then if Session.alive then API.Unload() end return end
-  if blockIfBlacklisted() then API.Unload() return end
-  if switchedOff() then API.Unload() return end
   if type(UI) ~= "table" or type(UI.AddTab) ~= "function" then API.Unload() return end
   Util.makeDirs(FOLDER)
   loadSettings()
   if Carry and isfile(FILES.log) then Log.file = FILES.log
-  elseif Util.write(FILES.log, "MM2 Hub v" .. VERSION .. " log\n") then Log.file = FILES.log end
+  elseif Util.write(FILES.log, "MM2 Hub " .. VERSION .. " log\n") then Log.file = FILES.log end
   Log.info(Carry and ("script reloaded by " .. tostring(Carry.reason or "anti-stall")) or "script started")
   Util.write(FILES.info, table.concat({
-    "MM2 Hub v" .. VERSION,
+    "MM2 Hub " .. VERSION,
     "",
     "Files in this folder:",
     "  settings.json  your saved menu settings",
@@ -1716,19 +1655,6 @@ task.spawn(function()
   loop("reset", Reset.step)
   loop("antiafk", AntiAfk.step)
   loop("antistall", Stall.step)
-  local blacklistAt = Util.now()
-  loop("blacklist", function()
-    if Util.now() - blacklistAt >= 300 then
-      blacklistAt = Util.now()
-      if blockIfBlacklisted() then API.Unload() end
-    end
-    return 30
-  end)
-  loop("toggle", function()
-    task.wait(TOGGLE_EVERY)
-    if Session.alive and switchedOff() then API.Unload() end
-    return 0.05
-  end)
   loop("vote", Vote.step)
   loop("antifling", AntiFling.step)
   loop("keys", Keys.step)
