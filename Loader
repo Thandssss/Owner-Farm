@@ -1,4 +1,4 @@
-local NAME, VERSION, TAB = "MM2", "V2.24.20 Owner Edition", "MM2 Hub"
+local NAME, VERSION, TAB = "MM2", "V2.24.22 Coins - No Voting", "MM2 Hub"
 local GAME_IDS, PLACE_IDS = {"66654135"}, {"142823291"}
 local function inGame()
   for _, id in ipairs(GAME_IDS) do if tonumber(id) == game.GameId then return true end end
@@ -83,7 +83,7 @@ local BAGS = {40, 50}
 local HOOK_NAME = "MM2 Hub"
 local Defaults = {
   farm = false, farmSpeed = 22, bagSize = 40, avoidMurderer = true, farmAvoid = 20, farmReturn = true, keyFarm = 0x71,
-  autoReset = false, resetOffsets = false, autoVote = false, antiAfk = false, statsOverlay = true, xpFarm = false, layDown = false, startUnder = false,
+  autoReset = false, resetOffsets = false, antiAfk = false, statsOverlay = true, xpFarm = false, layDown = false, startUnder = false,
   farFromPlayers = false, directRoute = false, antiStall = false, antiFling = true,
   webhookOn = false, webhookUrl = "", webhookEvery = 10, webhookName = "",
 }
@@ -181,18 +181,24 @@ end
 local Game = {map = nil, holder = nil, coinContainer = nil, path = nil, scanAt = -10, mapName = nil, special = false,
   me = nil, murderers = {}, coins = {}, bag = 0, bagRound = nil, aliveAt = -10, alive = {}, roundId = 0, note = "lobby",
   bottom = nil, bottomRound = nil}
-local NOT_MAPS = {Lobby = true, Camera = true, Terrain = true, PetContainer = true, RCCars = true, WeaponDisplays = true}
+local NOT_MAPS = {RegularLobby = true, Lobby = true, Camera = true, Terrain = true, PetContainer = true, RCCars = true, WeaponDisplays = true}
 local PART_CLASSES = {Part = true, MeshPart = true, UnionOperation = true, WedgePart = true, CornerWedgePart = true, TrussPart = true}
+function Game.lobby()
+  return workspace:FindFirstChild("RegularLobby") or workspace:FindFirstChild("Lobby")
+end
+local function isLobby(inst)
+  return inst.Name:lower():find("lobby", 1, true) ~= nil
+end
 local function isContainer(inst) local c = inst.ClassName return c == "Model" or c == "Folder" end
 function Game.scanMap()
   local best, bestScore = nil, -1
   for _, top in ipairs(workspace:GetChildren()) do
-    if isContainer(top) and not NOT_MAPS[top.Name] and not Players:FindFirstChild(top.Name) then
+    if isContainer(top) and not NOT_MAPS[top.Name] and not isLobby(top) and not Players:FindFirstChild(top.Name) then
       local function consider(holder, sub)
         local cc = holder:FindFirstChild("CoinContainer")
         local spawns = holder:FindFirstChild("Spawns")
         if not cc and not spawns then return end
-        local score = (cc and 1 or 0) + (spawns and 1000 or 0) + (top:FindFirstChild("Spawns") and 500 or 0)
+        local score = (cc and 2000 or 0) + (spawns and 1000 or 0) + (top:FindFirstChild("Spawns") and 500 or 0)
         if score > bestScore then best, bestScore = {top = top.Name, sub = sub}, score end
       end
       consider(top, nil)
@@ -205,6 +211,7 @@ function Game.scanMap()
 end
 function Game.resolve(path)
   local top = workspace:FindFirstChild(path.top)
+  if not top or isLobby(top) then return nil end
   local holder = top and (path.sub and top:FindFirstChild(path.sub) or top)
   if not holder then return nil end
   local cc = holder:FindFirstChild("CoinContainer")
@@ -219,7 +226,8 @@ end
 function Game.findMap()
   if Game.path then
     local top, holder, cc = Game.resolve(Game.path)
-    if top then return top, holder, cc end
+    -- Reconsider loaded maps periodically; a departing map can remain in Workspace.
+    if top and Util.now() - Game.scanAt < 2 then return top, holder, cc end
     Game.path = nil
   end
   local t = Util.now()
@@ -253,9 +261,12 @@ end
 function Game.collect()
   local map, holder, cc = Game.findMap()
   local name = map and (Game.path.sub and (Game.path.top .. "/" .. Game.path.sub) or Game.path.top) or nil
-  if name ~= Game.mapName then
+  local address = map and Util.get(function() return map.Address end)
+  if name ~= Game.mapName or address ~= Game.mapAddress then
     local old = Game.mapName
-    Game.mapName = name
+    Game.mapName, Game.mapAddress = name, address
+    Game.coins, Game.coinsPresent = {}, {}
+    Game.bottom, Game.bottomRound = nil, nil
     if old then Game.roundEnd() end
     if name then
       Game.roundId, Game.roundAt = Game.roundId + 1, Util.now()
@@ -304,31 +315,27 @@ end
 function Game.readBag()
   local lp = Players.LocalPlayer
   local box = Util.get(function() return lp.PlayerGui.MainGUI.Game.CoinBags.Container end)
-  if not box then return Game.bag end
-  local best = 0
-  for _, c in ipairs(box:GetChildren()) do
-    local txt = Util.get(function() return c.CurrencyFrame.Icon.Coins.Text end)
-    local n = tonumber(txt and txt:match("%d+") or "")
-    if n and n > best then best = n end
-  end
-  Game.bag = best
-  Game.bagRound = Game.roundId
-  return best
+  local coin = box and box:FindFirstChild("Coin")
+  local txt = coin and Util.get(function() return coin.CurrencyFrame.Icon.Coins.Text end)
+  local n = type(txt) == "string" and tonumber((txt:gsub(",", ""):match("%d+")))
+  -- Other event bags stay in the UI after the event. Never take their maximum.
+  if n then Game.bag, Game.bagRound = n, Game.roundId end
+  return Game.bag
 end
 function Game.listCoins()
   local cc = Game.coinContainer
   local out, present = {}, {}
-  local function add(c)
-    if c.Name == "Coin_Server" then
+  local function visit(c, depth)
+    if c.Name == "Coin_Server" and PART_CLASSES[c.ClassName] then
       out[#out + 1] = c
       local a = Util.get(function() return c.Address end)
       if a then present[a] = true end
+    elseif depth < 3 and isContainer(c) then
+      for _, child in ipairs(Util.get(function() return c:GetChildren() end) or {}) do visit(child, depth + 1) end
     end
   end
   if cc then
-    for _, c in ipairs(Util.get(function() return cc:GetChildren() end) or {}) do
-      if isContainer(c) then for _, cc2 in ipairs(Util.get(function() return c:GetChildren() end) or {}) do add(cc2) end else add(c) end
-    end
+    for _, c in ipairs(Util.get(function() return cc:GetChildren() end) or {}) do visit(c, 0) end
   end
   Game.coins, Game.coinsPresent = out, present
   return out
@@ -389,7 +396,7 @@ local Fly = {path = nil, leg = 0, legFrom = nil, legTo = nil, legAt = 0, legDur 
 local LAY_TILT = CFrame.Angles(math.rad(90), 0, 0)
 -- On a map the body turns about 10-60 degrees a second and Matcha can't write angular velocity, so the
 -- tilt is re-applied with every move and often while parked. LAY_HIDE keeps a flat body under the floor
--- between candies.
+-- between coins.
 local LAY_PARK_EVERY, LAY_ZERO_EVERY, LAY_HIDE = 0.05, 0.1, 1.4
 local MOVE_SPEED = 22
 function Fly.facing(root)
@@ -618,11 +625,16 @@ function Farm.startPark(force)
   return Farm.parking
 end
 function Farm.lobbyPos()
-  if Farm.lobbyRef then return Farm.lobbyRef end
-  local lobby = workspace:FindFirstChild("Lobby")
-  local box = lobby and lobby:FindFirstChild("Box")
-  Farm.lobbyRef = box and Util.get(function() return box.Position end)
-  return Farm.lobbyRef
+  local lobby = Game.lobby()
+  if not lobby then return nil end
+  local spawns = lobby:FindFirstChild("Spawns")
+  local list = spawns and Util.get(function() return spawns:GetChildren() end) or {}
+  for _, spawn in ipairs(list) do
+    local pos = Util.get(function() return spawn.Position end)
+    if pos then return pos end
+  end
+  local box = lobby:FindFirstChild("Box")
+  return box and Util.get(function() return box.Position end)
 end
 -- The lobby sits well above every map, and the old map stays loaded for a while after you're sent back.
 function Farm.inLobby()
@@ -730,7 +742,7 @@ function Farm.pick(root)
     if not Game.coinTaken(item.c) then
       if closest and closest ~= item.key and item.d > closestD + 8 and t - (Farm.whyAt or -10) > 3 then
         Farm.whyAt = t
-        Log.info(string.format("pick: went %d studs, closest candy (%d studs) was %s", math.floor(item.d), math.floor(closestD),
+        Log.info(string.format("pick: went %d studs, closest coin (%d studs) was %s", math.floor(item.d), math.floor(closestD),
           closestWhy or "already collected"))
       end
       return item
@@ -772,7 +784,7 @@ function Farm.step()
   end
   if Game.bag >= Settings.bagSize or Farm.full then
     if Farm.phase ~= "full" and Farm.phase ~= "holding" then
-      Log.info("candy bag full") Farm.stop("bag full") Farm.phase = "full" Session.stats.fullBags = Session.stats.fullBags + 1
+      Log.info("coin bag full") Farm.stop("bag full") Farm.phase = "full" Session.stats.fullBags = Session.stats.fullBags + 1
       if not Settings.xpFarm then
         if not Farm.parked and Farm.startPark() then return TICK end
         Farm.reset()
@@ -804,7 +816,7 @@ function Farm.step()
       taken = Game.coinTaken(tgt.c)
     end
     if taken and Farm.holdAt then
-      Trace.mark("farm: candy collected")
+      Trace.mark("farm: coin collected")
       Farm.collected, Farm.misses = Farm.collected + 1, 0
       Farm.skip[tgt.key] = t + 30
       Farm.target, tgt, Farm.holdAt, Farm.nextAt = nil, nil, nil, t + FARM_DELAY
@@ -814,7 +826,7 @@ function Farm.step()
     elseif Farm.holdAt and t - Farm.holdAt > 1.5 then
       Farm.skip[tgt.key] = t + 20
       Farm.misses = Farm.misses + 1
-      if Farm.misses >= 4 and Game.bag > 0 then Farm.full = true Log.info("candies stopped counting at " .. Game.bag) end
+      -- Missed or contested coins do not prove the bag is full; use the coin HUD count.
       Farm.target, tgt, Farm.holdAt = nil, nil, nil
     elseif t - Farm.targetAt > 30 then
       Farm.skip[tgt.key] = t + 20
@@ -823,7 +835,7 @@ function Farm.step()
       Farm.skip[tgt.key] = t + 5
       Fly.cancel()
       Farm.target, tgt, Farm.holdAt = nil, nil, nil
-      if t - (Farm.fledAt or -10) > 3 then Farm.fledAt = t Log.info("avoid: murderer within " .. Settings.farmAvoid .. " studs, dropped the candy") end
+      if t - (Farm.fledAt or -10) > 3 then Farm.fledAt = t Log.info("avoid: murderer within " .. Settings.farmAvoid .. " studs, dropped the coin") end
     elseif Settings.farFromPlayers and not Farm.holdAt and t - (Farm.contestAt or -10) >= 0.25 then
       Farm.contestAt = t
       local here = Fly.here()
@@ -837,7 +849,7 @@ function Farm.step()
   end
   if not tgt and t < Farm.nextAt then
     if Fly.active() then Fly.tick() end
-    Farm.phase, Farm.note = "farming", "next candy"
+    Farm.phase, Farm.note = "farming", "next coin"
     return TICK
   end
   if not tgt then
@@ -846,13 +858,13 @@ function Farm.step()
       return TICK
     end
     Farm.listAt = t
-    Trace.mark("farm: listing candies")
+    Trace.mark("farm: listing coins")
     Game.listCoins()
-    Trace.mark("farm: picking a candy")
+    Trace.mark("farm: picking a coin")
     tgt = Farm.pick(me.root)
     Trace.mark("farm: picked")
     if not tgt then
-      Farm.phase, Farm.note = "searching", (#Game.coins == 0 and "no candies yet" or "no safe candy")
+      Farm.phase, Farm.note = "searching", (#Game.coins == 0 and "no coins yet" or "no safe coin")
       local here = not Fly.active() and t - (Farm.hideAt or -10) > 3 and Fly.here()
       if here and Farm.nearDanger(here, Farm.dangerPositions()) and Farm.goUnder("avoid: murderer nearby") then
         Farm.hideAt = t
@@ -864,14 +876,14 @@ function Farm.step()
     local here = Fly.here()
     if not here or (tgt.p - here).Magnitude > 1500 then Farm.phase, Farm.note = "waiting", "not on the map" return 0.5 end
     Farm.target, Farm.targetAt, Farm.holdAt = tgt, t, nil
-    Trace.mark("farm: flying to a candy")
+    Trace.mark("farm: flying to a coin")
     Farm.route(tgt.p - Vector3.new(0, Settings.layDown and LAY_DEPTH or FARM_DEPTH, 0), tgt.p.Y - FLOOR_BELOW_COIN - FARM_TRAVEL, "coin")
   end
   Farm.phase = "farming"
-  Farm.note = Util.count(Farm.collected, "candy", "candies") .. " collected, " .. Util.count(#Game.coins, "candy", "candies") .. " left"
+  Farm.note = Util.count(Farm.collected, "coin", "coins") .. " collected, " .. Util.count(#Game.coins, "coin", "coins") .. " left"
   if Fly.tick() and not Farm.holdAt then
     Farm.holdAt = t
-    Trace.mark("farm: under the candy, waiting for it to count")
+    Trace.mark("farm: under the coin, waiting for it to count")
   end
   return TICK
 end
@@ -1035,102 +1047,18 @@ function AntiAfk.step()
   return 0.12
 end
 
-local VOTE_BEST = {"hotel", "bank2", "house2", "barn", "spaceship", "researchfacility"}
-local VOTE_WORST = {"vampirecastle", "milbase", "biolab", "policestation", "factory"}
-local VOTE_ALIAS = {hotel2 = "hotel", vampirescastle = "vampirecastle"}
-local Vote = {sig = nil, pick = nil, pickName = nil, movedAt = -10, note = "off",
-  openAt = -100, char = nil, landedAt = nil, counted = false, killed = false, killedAt = -10, kills = 0, fails = 0, noKill = false,
-  cast = 0, total = 0}
-local VOTE_LAND, VOTE_STACK_FOR, VOTE_RESPAWN, VOTE_MAX_FAILS = 0.15, 13, 0.5, 20
-function Vote.key(name)
-  local k = tostring(name or ""):lower():gsub("[^%w]", "")
-  return VOTE_ALIAS[k] or k
-end
-function Vote.score(name)
-  local k = Vote.key(name)
-  for i, m in ipairs(VOTE_BEST) do if m == k then return 100 - i end end
-  for i, m in ipairs(VOTE_WORST) do if m == k then return -i end end
-  return 0
-end
-function Vote.pads()
-  local folder = Util.get(function() return workspace.Lobby.VotePads end)
-  if not folder then return nil end
-  local out = {}
-  for i = 1, 3 do
-    local pad = folder:FindFirstChild("VotePad" .. i)
-    local name = pad and Util.get(function() return pad.VoteInfoGui.Container.MapName.Text end)
-    local part = pad and pad:FindFirstChild("Pad")
-    if not (name and part) then return nil end
-    local votes = Util.get(function() return pad.VoteInfoGui.Container.Votes.Text end)
-    out[i] = {name = name, part = part, votes = tonumber(type(votes) == "string" and votes:match("%d+") or "")}
-  end
-  return out
-end
-function Vote.step()
-  if not Settings.autoVote then Vote.note, Vote.sig = "off", nil return 0.5 end
-  local pads = Vote.pads()
-  if not pads then Vote.note = "no vote pads" return 1 end
-  local sig = pads[1].name .. "|" .. pads[2].name .. "|" .. pads[3].name
-  if sig ~= Vote.sig then
-    if Vote.sig and Vote.kills > 0 then Log.info("vote: re-voted " .. Util.count(Vote.kills, "time", "times") .. " for " .. tostring(Vote.pickName)) end
-    Vote.openAt = Vote.sig and Util.now() or -100
-    Vote.sig, Vote.pick, Vote.kills, Vote.fails, Vote.noKill, Vote.cast, Vote.mapVotes = sig, 1, 0, 0, false, 0, 0
-    for i = 2, 3 do if Vote.score(pads[i].name) > Vote.score(pads[Vote.pick].name) then Vote.pick = i end end
-    Vote.pickName = pads[Vote.pick].name
-    Log.info("vote: " .. pads[1].name .. " / " .. pads[2].name .. " / " .. pads[3].name .. " -> " .. Vote.pickName)
-  end
-  local onPad = pads[Vote.pick].votes
-  if onPad and onPad > (Vote.mapVotes or 0) then Vote.mapVotes = onPad end
-  local ch = Players.LocalPlayer.Character
-  local id = ch and Util.get(function() return ch.Address end)
-  local hum = ch and ch:FindFirstChildOfClass("Humanoid")
-  local hp = hum and Util.get(function() return hum.Health end)
-  local t = Util.now()
-  if id ~= Vote.char then Vote.char, Vote.landedAt, Vote.killed, Vote.counted = id, nil, false, false end
-  if Vote.killed and hp and hp > 0 and t - Vote.killedAt > VOTE_RESPAWN then Vote.landedAt, Vote.killed, Vote.counted = nil, false, false end
-  local root = ch and ch:FindFirstChild("HumanoidRootPart")
-  local here = root and Util.get(function() return root.Position end)
-  local lobby = Farm.lobbyPos()
-  if not (here and lobby) or (here - lobby).Magnitude > 300 then Vote.note = "waiting for the lobby" return 0.25 end
-  local target = Util.get(function() return pads[Vote.pick].part.Position end)
-  if not target then return 0.05 end
-  if (here - target).Magnitude > 3 then
-    if t - Vote.movedAt > 0.2 then
-      Vote.movedAt = t
-      pcall(function() root.Position = Vector3.new(target.X, target.Y + 0.5, target.Z) end)
-    end
-    Vote.landedAt, Vote.note = nil, "going to " .. Vote.pickName
-    return 0.05
-  end
-  if not Vote.counted and hp and hp > 0 and t - Vote.openAt < 17 then
-    Vote.counted, Vote.cast, Vote.total = true, Vote.cast + 1, Vote.total + 1
-  end
-  Vote.landedAt = Vote.landedAt or t
-  Vote.note = "voting " .. Vote.pickName
-  local stacking = t - Vote.openAt < VOTE_STACK_FOR and not Vote.noKill
-  if stacking and not Vote.killed and t - Vote.landedAt >= VOTE_LAND then
-    local a = hum and Reset.healthAddress(hum)
-    if a then
-      for _, off in ipairs(HEALTH_OFFSETS) do pcall(memory_write, "float", a + off, 0) end
-      Vote.killed, Vote.killedAt, Vote.kills, Vote.fails = true, t, Vote.kills + 1, 0
-      Vote.note = "re-voting " .. Vote.pickName .. " (" .. Vote.kills .. ")"
-    else
-      Vote.fails = Vote.fails + 1
-      if Vote.fails >= VOTE_MAX_FAILS then
-        Vote.noKill = true
-        Log.warn("vote: health offsets unavailable this vote (Unsafe LuaU is off or Roblox updated), just standing on the pad")
-      end
-    end
-  end
-  return 0.05
-end
-
 local Candy = {balance = nil}
-local CANDY_PAGES = {"BattlePass", "ShopBundles", "FinalReward", "Gifting"}
 function Candy.read()
-  local main = Util.get(function() return Players.LocalPlayer.PlayerGui.CrossPlatform.Halloween2026.MainEvent.Main end)
-  for _, page in ipairs(main and CANDY_PAGES or {}) do
-    local txt = Util.get(function() return main[page].Title.Tokens.Container.TextLabel.Text end)
+  local shop = Util.get(function() return Players.LocalPlayer.PlayerGui.CrossPlatform.Shop end)
+  local paths = {
+    {"Medium", "Title", "Coins", "Container", "Amount"},
+    {"Large", "BottomBar", "Coins", "Container", "Amount"},
+    {"Small", "Container", "Title", "Container", "Coins", "Container", "Amount"},
+  }
+  for _, path in ipairs(paths) do
+    local item = shop
+    for _, name in ipairs(path) do item = item and item:FindFirstChild(name) end
+    local txt = item and Util.get(function() return item.Text end)
     local n = type(txt) == "string" and tonumber((txt:gsub("[^%d]", "")))
     if n then return n end
   end
@@ -1171,7 +1099,7 @@ function Stall.step()
   if t < Stall.nextAt then Stall.note = "waiting" return 1 end
   local me = Game.me
   if Game.map and me and me.alive then Stall.note = "reloading after this round" return 1 end
-  if t - (Vote.openAt or -100) < 14 or Reset.active then Stall.note = "reloading after the vote" return 0.5 end
+  if Reset.active then Stall.note = "reloading after reset" return 0.5 end
   local ok, why = Stall.reload()
   if ok then Stall.note = "reloading" return 5 end
   if not Stall.warned then Stall.warned = true Log.warn("anti-stall: can't reload (" .. why .. "), pausing the farm instead") end
@@ -1211,7 +1139,7 @@ function AntiFling.step()
   end
   local me = Game.me
   local root = me and me.alive and me.root
-  local killing = Reset.active or (Vote.killed and t - (Vote.killedAt or -100) < 3)
+  local killing = Reset.active
   if not root or killing then AntiFling.safe = nil return AF_TICK end
   local char = Util.get(function() return Players.LocalPlayer.Character.Address end)
   if char ~= AntiFling.safeChar then AntiFling.safe, AntiFling.safeChar = nil, char end
@@ -1303,9 +1231,9 @@ function Stats.step()
   Candy.balance = Candy.read() or Candy.balance
   local text = {
     "Total Running Time: " .. Stats.clock(up),
-    "Candies Per Hour: " .. Stats.perHour(total, up),
-    "Candies Collected: " .. total,
-    "Candies Total: " .. (Candy.balance and commas(Candy.balance) or "?"),
+    "Coins Per Hour: " .. Stats.perHour(total, up),
+    "Coins Collected: " .. total,
+    "Coins Total: " .. (Candy.balance and commas(Candy.balance) or "?"),
     "Rounds: " .. st.rounds,
     "Full Bags: " .. st.fullBags,
     "Full Bag %: " .. Stats.fullPct(st.fullBags, st.rounds) .. "%",
@@ -1315,10 +1243,6 @@ function Stats.step()
     "Map: " .. (Game.mapName and not Farm.inLobby() and tostring(Game.mapName) or "Lobby"),
   }
   if Settings.antiFling then text[#text + 1] = "Flings Blocked: " .. AntiFling.blocked end
-  if Settings.autoVote then
-    text[#text + 1] = "Voting: " .. (Vote.pickName or "Waiting")
-    text[#text + 1] = "Votes Cast: " .. (Vote.mapVotes or 0)
-  end
   local w, lineH, pad = 260, 23, 11
   local h = #text * lineH + pad * 2 - 4
   local x, y = math.floor(vp.X - w - 16), math.floor(vp.Y / 2 - h / 2)
@@ -1369,8 +1293,8 @@ function Hook.statsPayload(title, s, description)
       description = description,
       color = 0x5865F2,
       fields = {
-        {name = "Candies Total", value = s.balance and commas(s.balance) or "unknown", inline = true},
-        {name = "Candies / Hour", value = commas(s.perHour), inline = true},
+        {name = "Coins Total", value = s.balance and commas(s.balance) or "unknown", inline = true},
+        {name = "Coins / Hour", value = commas(s.perHour), inline = true},
         {name = "Running Time", value = Stats.clock(s.up), inline = true},
         {name = "Full Bags", value = tostring(s.fullBags), inline = true},
         {name = "Rounds Total", value = tostring(s.rounds), inline = true},
@@ -1439,7 +1363,7 @@ function Hook.step()
 end
 
 local API = {Version = VERSION, Settings = Settings}
-local POSES, BAG_NAMES = {"Standing", "Lying down"}, {"40 candies", "50 candies"}
+local POSES, BAG_NAMES = {"Standing", "Lying down"}, {"40 coins", "50 coins"}
 local TARGET_MODES = {"Nearest", "Far from players"}
 local ROUTE_MODES = {"Underground", "Direct"}
 local RESET_MODES = {"Esc + R + Enter", "Offsets"}
@@ -1460,7 +1384,6 @@ local SYNC = {
   {id = "mm2_xp", key = "xpFarm", exclusive = true},
   {id = "mm2_reset", key = "autoReset", exclusive = true},
   {id = "mm2_reset_method", key = "resetOffsets", map = function(raw) return comboIndex(raw) == 1 end},
-  {id = "mm2_vote", key = "autoVote"},
   {id = "mm2_antiafk", key = "antiAfk"},
   {id = "mm2_antistall", key = "antiStall"},
   {id = "mm2_antifling", key = "antiFling"},
@@ -1496,27 +1419,27 @@ function UIState.step()
 end
 local function buildTab(tab)
   Session.built = true
-  local farm = tab:Section("Candy Farm", "Left")
-  farm:Toggle("mm2_farm", "Candy farm", Settings.farm)
-  Keys.add("farm", farm:Keybind("mm2_farm_kb", Settings.keyFarm, "toggle"), "keyFarm", function() Keys.flipSetting("farm", "mm2_farm", "Candy farm") end)
+  local farm = tab:Section("Coin Farm", "Left")
+  farm:Toggle("mm2_farm", "Coin farm", Settings.farm)
+  Keys.add("farm", farm:Keybind("mm2_farm_kb", Settings.keyFarm, "toggle"), "keyFarm", function() Keys.flipSetting("farm", "mm2_farm", "Coin farm") end)
   farm:Text("Use time manip at 0.10 in delta mode.")
   farm:Combo("mm2_pose", "Position", POSES, Settings.layDown and 1 or 0)  farm:SliderInt("mm2_farm_speed", "Fly speed (studs/s)", 5, 26, Settings.farmSpeed)
   farm:Combo("mm2_bag", "Bag size", BAG_NAMES, indexOf(BAGS, Settings.bagSize))
   farm:Toggle("mm2_avoid_on", "Avoid the murderer", Settings.avoidMurderer)
   farm:SliderInt("mm2_avoid", "Avoid distance (studs)", 0, 100, Settings.farmAvoid)
   farm:Toggle("mm2_start_under", "Start farm under the map", Settings.startUnder)
-  farm:Text("Waits under the map until candies appear.")
+  farm:Text("Waits under the map until coins appear.")
   farm:Toggle("mm2_antifling", "Anti-fling", Settings.antiFling)
   farm:Text("Other players can't push or fling you.")
 
-  local rt = tab:Section("Candy Route", "Left")
+  local rt = tab:Section("Coin Route", "Left")
   rt:Combo("mm2_route", "Route", ROUTE_MODES, Settings.directRoute and 1 or 0)
   rt:Text("Underground flies under the floor.")
-  rt:Text("Direct flies straight from candy to candy.")
+  rt:Text("Direct flies straight from coin to coin.")
 
-  local tg = tab:Section("Candy Target", "Left")
+  local tg = tab:Section("Coin Target", "Left")
   tg:Combo("mm2_target", "Go for", TARGET_MODES, Settings.farFromPlayers and 1 or 0)
-  tg:Text("Far from players skips candies that")
+  tg:Text("Far from players skips coins that")
   tg:Text("other players will reach first.")
 
   local full = tab:Section("After Bag Full", "Left")
@@ -1556,11 +1479,7 @@ local function buildTab(tab)
   rm:Text("Offsets requires Unsafe LuaU.")
   rm:Text("Esc + R + Enter needs Roblox tabbed in.")
 
-  local av = tab:Section("Auto Vote", "Right")
-  av:Toggle("mm2_vote", "Spam vote the best map", Settings.autoVote)
-  av:Text("Votes for the map with the most candies.")
-  av:Text("Requires Unsafe LuaU.")
-  av:Text(" ")
+
 end
 
 local function loop(name, body)
@@ -1577,12 +1496,12 @@ end
 function API.State()
   return {version = VERSION, map = Game.mapName, mapPath = Game.path, murderers = #Game.murderers,
     meAlive = Game.me and Game.me.alive, bag = Game.bag, farm = {phase = Farm.phase, note = Farm.note},
-    reset = {active = Reset.active, note = Reset.note}, antiAfk = AntiAfk.note, antiStall = Stall.note, vote = Vote.note, coins = #Game.coins,
+    reset = {active = Reset.active, note = Reset.note}, antiAfk = AntiAfk.note, antiStall = Stall.note, coins = #Game.coins,
     mapBottom = Game.bottom, stats = Session.stats, built = Session.built, alive = Session.alive}
 end
 function API.GetLog(n) return Log.tail(n) end
 local WIDGET = {farm = "mm2_farm", autoReset = "mm2_reset", antiAfk = "mm2_antiafk", statsOverlay = "mm2_stats", farmReturn = "mm2_farm_return", xpFarm = "mm2_xp",
-  farmSpeed = "mm2_farm_speed", avoidMurderer = "mm2_avoid_on", farmAvoid = "mm2_avoid", startUnder = "mm2_start_under", webhookName = "mm2_hook_name", autoVote = "mm2_vote", antiStall = "mm2_antistall", antiFling = "mm2_antifling"}
+  farmSpeed = "mm2_farm_speed", avoidMurderer = "mm2_avoid_on", farmAvoid = "mm2_avoid", startUnder = "mm2_start_under", webhookName = "mm2_hook_name", antiStall = "mm2_antistall", antiFling = "mm2_antifling"}
 function API.SetSetting(k, v)
   local ok, why
   if EXCLUSIVE[k] then ok, why = setExclusive(k, v) else ok, why = set(k, v) end
@@ -1655,7 +1574,6 @@ task.spawn(function()
   loop("reset", Reset.step)
   loop("antiafk", AntiAfk.step)
   loop("antistall", Stall.step)
-  loop("vote", Vote.step)
   loop("antifling", AntiFling.step)
   loop("keys", Keys.step)
   loop("menu", UIState.step)
